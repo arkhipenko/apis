@@ -1,7 +1,7 @@
 /* -------------------------------------
  Automatic Plant Irrigation System - APIS
-   Code Version 1.7.1
-   Parameters Version 12
+   Code Version 1.8.0
+   Parameters Version 13
 
  Change Log:
   2015-02-27:
@@ -39,6 +39,8 @@
   2015-11-17:
     v1.7.1 - debounce the buttons with 10 ms delay
     v1.7.1 - complie against the fork of Time to exclude time provider sync at every call to now()
+  2015-11-19
+    v1.8.0 - more extensive logging, including start/stop time of the watering run, number of runs and start/stop humidity
     
  ----------------------------------------*/
 
@@ -108,10 +110,10 @@
 #define WEEKENDADJ_MIN  0  // number of hours to add for the wakeup on a weekend
 #define WEEKENDADJ_MAX  12  // number of hours to add for the wakeup on a weekend
 
-#define PARAMADDR   0
+#define PARAMADDR   128
 #define LOGIDXADDR  (PARAMADDR+sizeof(parameters))
 #define LOGADDR     (LOGIDXADDR+2)
-#define MAXLOGS     10
+#define MAXLOGS     20
 #define RUNNING_DISPLAY_START_DELAY  1000
 #define RUNNING_DISPLAY_DELAY  250
 #define SENSOR_OUT_VALUE  1000
@@ -144,7 +146,7 @@ Output<M1P2>              pM1P2;
 Output<M1E1>              pM1E1;
 
 
-const char CToken[] = "APIS12\0"; // Eeprom token: Automatic Plant Irrigation System
+const char CToken[] = "APIS13\0"; // Eeprom token: Automatic Plant Irrigation System
 
 int state;
 boolean error, night_time;
@@ -152,10 +154,10 @@ boolean error, night_time;
 #ifndef _TEST_
 int   currentHumidity = 0;
 #else
-int   currentHumidity = 65;
+int   currentHumidity = 60;
 #endif;
 
-enum Display_Options {
+enum Display_Options : byte {
   DHUMIDITY,
   DHIGH_MARK,
   DLOW_MARK,
@@ -219,6 +221,8 @@ void settingsToutCallback();
 void displayCallback();
 void interruptCallback();
 void waterCallback();
+bool waterOnEnable();
+void waterOnDisable();
 void animationWaterCallback();
 void errorCallback();
 void timeSyncCallback();
@@ -234,7 +238,7 @@ Task tDisplay   (TDISPLAY_INTERVAL * TASK_SECOND, TASK_FOREVER, &displayCallback
 Task tDisplayRunning (RUNNING_DISPLAY_START_DELAY, TASK_FOREVER, &displayRunningCallback, &ts);
 Task tDisplayTimeout (TDISPLAY_TIMEOUT * TASK_SECOND, TASK_FOREVER, &displayTimeout, &ts, true); 
 Task tInterrupt (TI_INTERVAL, TASK_ONCE, &interruptCallback, &ts);
-Task tWater     (SATURATE * TASK_MINUTE, RETRIES, &waterCallback, &ts);
+Task tWater     (SATURATE * TASK_MINUTE, RETRIES, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
 Task tWaterOff  (WATERTIME * TASK_SECOND, TASK_ONCE, &waterOffCallback, &ts);
 Task tWaterAnimation (ANIMATION_MILLIS, TASK_FOREVER, &animationWaterCallback, &ts);
 Task tError     (TASK_IMMEDIATE, TASK_FOREVER, &errorCallback, &ts);
@@ -254,8 +258,16 @@ struct {
   byte      gotosleep;  //  +12: hour to go goodnight (e.g., 22)
   byte      wakeup;     //  +13: hour to wake up (e.g., 08)
   byte      wkendadj;   //  +14: weekend wake up adjustment time
-}
-parameters;
+} parameters;
+
+struct {
+  time_t    water_start;  // time watering run started
+  byte      hum_start;    // humidity at the start
+  byte      num_runs;     // number of runs it took to water
+  byte      run_duration; // run durations
+  time_t    water_end;    // time watering stopped
+  byte      hum_end;      // humidity at the end of run
+} water_log;
 
 struct {
   byte  cn;
@@ -383,15 +395,18 @@ void testHumidityCallback() {
   if (currentHumidity == 0) currentHumidity = 65;
   if (tWater.isEnabled()) {
     currentHumidity++;
-    tTestHumidity.setInterval(2000);
+    if (tWaterOff.isEnabled())
+      tTestHumidity.setInterval(2000);
+    else
+      tTestHumidity.setInterval(10000);    
   }
   else {
     currentHumidity--;
     tTestHumidity.setInterval(10000);
   }
   
-  if (currentHumidity > 85) currentHumidity = 85;
-  if (currentHumidity < 40) currentHumidity = 40;
+  if (currentHumidity > 95) currentHumidity = 95;
+  if (currentHumidity < 20) currentHumidity = 20;
   
 }
 #endif
@@ -457,15 +472,17 @@ void writeLogEntry() {
   time_t uxtime = now();
 //  unsigned long uxtime = now.unixtime();
 
-  byte *p = (byte *) &uxtime;
-
+//  byte *p = (byte *) &uxtime;
+  byte *p = (byte *) &water_log;
+  int   len = sizeof(water_log);
+  
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": writeLogEntry.");
+  Serial.print(millis());
+  Serial.println(": writeLogEntry.");
 #endif
 
-  for (int i = 0; i < sizeof(unsigned long); i++, p++) {
-    EEPROM.update (LOGADDR + logIndex * sizeof(unsigned long) + i, *p);
+  for (int i = 0; i < len; i++, p++) {
+    EEPROM.update (LOGADDR + logIndex * len + i, *p);
   }
   if (++logIndex >= MAXLOGS) logIndex = 0;
   if (++logCount >= MAXLOGS) logCount = MAXLOGS;
@@ -474,33 +491,34 @@ void writeLogEntry() {
 }
 
 
-unsigned long lastLogEntryDate() {
+bool lastLogEntry() {
 #ifdef _DEBUG_
 //  Serial.print(millis());
 //  Serial.println(": lastLogEntryDate.");
 #endif
   
-  return readLogEntryDate(0);
+  return readLogEntry(0);
 }
 
 
-unsigned long readLogEntryDate(int aIndex) {
-  unsigned long uxtime;
-  byte *p = (byte *) &uxtime;
+bool readLogEntry(int aIndex) {
+//  unsigned long uxtime;
+  byte *p = (byte *) &water_log;
+  int   len = sizeof(water_log);
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": readLogEntryDate.");
+  Serial.print(millis());
+  Serial.println(": readLogEntryDate.");
 #endif
 
-  if (logCount == 0) return 0;
-  if (aIndex < 0 || aIndex > logCount) return 0;
+  if (logCount == 0) return false;
+  if (aIndex < 0 || aIndex > logCount) return false;
   int index = logIndex - aIndex - 1;
   if (index < 0) index += MAXLOGS;
-  for (int j = 0; j < sizeof(unsigned long); j++, p++) {
-    *p = EEPROM.read (LOGADDR + index * sizeof(unsigned long) + j);
+  for (int j = 0; j < len; j++, p++) {
+    *p = EEPROM.read (LOGADDR + index * len + j);
   }
-  return uxtime;
+  return true;
 }
 
 
@@ -511,18 +529,12 @@ void measurePowerupCallback() {
 //  Serial.println(": measurePowerupCallback.");
 #endif
   measurePower(true);
-  tMeasure.set(TMEASURE_PRIME * TASK_SECOND, -1, &measureCallback);
+  tMeasure.set(TMEASURE_PRIME * TASK_SECOND, TASK_FOREVER, &measureCallback);
   tMeasure.enableDelayed();
 }
 
 
 void measureCallback() {
-#ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.print(": measureCallback. Humidity =");
-//  Serial.print(currentHumidity);
-//  Serial.println("%");
-#endif
 
 #ifdef _TEST_
   tTestHumidity.enableIfNot();
@@ -533,16 +545,23 @@ void measureCallback() {
     delay(10);
   }
 
+#ifdef _DEBUG_
+  Serial.print(millis());
+  Serial.print(": measureCallback. Humidity =");
+  Serial.print(currentHumidity);
+  Serial.println("%");
+#endif
+
   if (currentHumidity > 0 && currentHumidity < parameters.low) {
     if (!tWater.isEnabled()) {
       showHumidity(0);
-      tWater.set(parameters.saturate * TASK_MINUTE, parameters.retries + 1, &waterCallback);
-      tWater.enable();
-      tMeasure.set(TMEASURE_WATERTIME * TASK_SECOND, -1, &measureCallback);
+//      tWater.set(parameters.saturate * TASK_MINUTE, parameters.retries + 1, &waterCallback, &waterOnEnable, &waterOnDisable);
+      tWater.setInterval( parameters.saturate * TASK_MINUTE );
+      tWater.setIterations( parameters.retries + 1 );
+      tWater.restart();
+      tMeasure.set(TMEASURE_WATERTIME * TASK_SECOND, TASK_FOREVER, &measureCallback);
       tMeasure.enableDelayed();  
       error = false;
-      writeLogEntry();
-      //      lastWaterTime = millis();
     }
     return;
   }
@@ -550,34 +569,54 @@ void measureCallback() {
   showHumidity(1);
   if (tWater.isEnabled() && currentHumidity >= parameters.high) {
     tWater.disable();
-    tWaterOff.disable();
-    tWaterAnimation.disable();
-    motorOff();
   }
   
   if (!tWater.isEnabled() ) {
     measurePower(false);
-    tMeasure.set(TMEASURE_INTERVAL * TASK_SECOND, -1, &measurePowerupCallback);
+    tMeasure.set(TMEASURE_INTERVAL * TASK_SECOND, TASK_FOREVER, &measurePowerupCallback);
     tMeasure.enableDelayed();  
   }
 }
 
+bool waterOnEnable() {
+  
+  if (night_time) {
+    motorOff();
+    return false;
+  } 
+
+  water_log.water_start = now();
+  water_log.hum_start = currentHumidity;
+  water_log.num_runs = 0;
+  water_log.run_duration = parameters.watertime;
+
+  return true;
+}
+
+void waterOnDisable() {
+  
+  tWaterOff.disable();
+  tWaterAnimation.disable();
+  motorOff();
+  
+  water_log.water_end = now();
+  water_log.hum_end = currentHumidity;  
+  
+  writeLogEntry();  
+}
 
 void waterCallback() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.print(": waterCallback. Iteration: ");
-//  Serial.println(tWater.getIterations());
+  Serial.print(millis());
+  Serial.print(": waterCallback. Iteration: ");
+  Serial.println(tWater.getIterations());
 #endif
-  if (night_time) {
-    motorOff();
-    return;
-  }
 
   if (!tWater.isLastIteration()) {
     motorOn();
+    water_log.num_runs++;
     tWaterOff.set(parameters.watertime * TASK_SECOND, 1, &waterOffCallback);
-    tWaterOff.enableDelayed();
+    tWaterOff.restartDelayed();
     tWaterAnimation.setCallback(&animationWaterCallback);
     tWaterAnimation.enable();
     showHumidity(0);
@@ -586,9 +625,6 @@ void waterCallback() {
   currentHumidity = measureHumidity();
   if ( currentHumidity >= parameters.low ) {
     tWater.disable();
-    tWaterOff.disable();
-    tWaterAnimation.disable();
-    motorOff();
     showHumidity(1);
     return;
   }
@@ -599,14 +635,13 @@ void waterCallback() {
 
 void waterOffCallback() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": waterOffCallback.");
+  Serial.print(millis());
+  Serial.println(": waterOffCallback.");
 #endif
   motorOff();
-  tWater.enableDelayed();
+  tWater.delay();
   tWaterAnimation.setCallback(&animationSaturateCallback);
   tWaterAnimation.enable();
-
 }
 
 
@@ -655,16 +690,15 @@ void displayTimeout() {
 //  Serial.print(millis());
 //  Serial.println(": displayTimeout.");
 #endif  
-  if (tWater.isEnabled()) return; 
-  panelOff();
+  if (!tWater.isEnabled()) panelOff();
 }
 
 
-
+#define LINELEN (100)
 void displayCallback() {
-  char line[65];
+  char line[LINELEN+1];
   int h = currentHumidity;
-  unsigned long lastWaterTime;
+//  unsigned long lastWaterTime;
   time_t  tnow;
 
   tDisplayTimeout.delay();
@@ -678,7 +712,7 @@ void displayCallback() {
       break;
 
     case DGOODNIGHT:
-      snprintf(line, 64, "good night    ");
+      snprintf(line, LINELEN, "good night    ");
       line[strlen(line) - 1] |= 0x80; // put a dot so we see it's on
 //      tDisplayRunning.setIterations(panel.displayRunning(line));
       panel.displayRunning(line); 
@@ -742,22 +776,25 @@ void displayCallback() {
       break;
 
     case DLOG_V:
-      snprintf(line, 64, "%02d %02d-%02d at %02d%02d", paramIndex+1, time.mt, time.dy, time.hr, time.mn);
-      line[strlen(line) - 3] |= 0x80; //enable dot
-      line[1] |= 0x80;
-      
+        snprintf(line, LINELEN, "%02d start on %02d-%02d at %02d%02d %02d h %02d runs end on %02d-%02d at %02d%02d %02d h", paramIndex+1,\
+          month(myTZ.toLocal(water_log.water_start)), day(myTZ.toLocal(water_log.water_start)), hour(myTZ.toLocal(water_log.water_start)),\
+          minute(myTZ.toLocal(water_log.water_start)), water_log.hum_start, water_log.num_runs,\
+          month(myTZ.toLocal(water_log.water_end)), day(myTZ.toLocal(water_log.water_end)), hour(myTZ.toLocal(water_log.water_end)),\
+          minute(myTZ.toLocal(water_log.water_end)), water_log.hum_end );
+        line[1] |= 0x80;        
+        line[22] |= 0x80; //enable dot
+        line[56] |= 0x80; //enable dot
+
       panel.displayRunning(line); 
       tDisplayRunning.setInterval(RUNNING_DISPLAY_START_DELAY);
       tDisplayRunning.enableDelayed();
 
-//      delay(RUNNING_DISPLAY_START_DELAY);
-//      while (panel.displayRunningShift()) delay(RUNNING_DISPLAY_DELAY);
       switchDisplayNow(DLOG_P, 1);
       return;
 
     case DTIME:
       tnow = myTZ.toLocal( now() );
-      snprintf(line, 64, "date %04d-%02d-%02d %02d%02d", year(tnow), month(tnow), day(tnow), hour(tnow), minute(tnow));
+      snprintf(line, LINELEN, "date %04d-%02d-%02d %02d%02d", year(tnow), month(tnow), day(tnow), hour(tnow), minute(tnow));
       line[17] |= 0b10000000;  //dot
       panel.displayRunning(line); 
       tDisplayRunning.setInterval(RUNNING_DISPLAY_START_DELAY);
@@ -769,15 +806,20 @@ void displayCallback() {
       return;
 
     case DRUN:
-      lastWaterTime = myTZ.toLocal(lastLogEntryDate());
-      if (lastWaterTime) {
+//      lastWaterTime = myTZ.toLocal(lastLogEntryDate());
+      if (lastLogEntry()) {
 //        DateTime wt(lastWaterTime);
 
-        snprintf(line, 64, "last run on %02d-%02d at %02d%02d", month(lastWaterTime), day(lastWaterTime), hour(lastWaterTime), minute(lastWaterTime));
-        line[strlen(line) - 3] |= 0x80; //enable dot
+        snprintf(line, LINELEN, "last run start on %02d-%02d at %02d%02d %02d h %02d runs end on %02d-%02d at %02d%02d %02d h",\
+          month(myTZ.toLocal(water_log.water_start)), day(myTZ.toLocal(water_log.water_start)), hour(myTZ.toLocal(water_log.water_start)),\
+          minute(myTZ.toLocal(water_log.water_start)), water_log.hum_start, water_log.num_runs,\
+          month(myTZ.toLocal(water_log.water_end)), day(myTZ.toLocal(water_log.water_end)), hour(myTZ.toLocal(water_log.water_end)),\
+          minute(myTZ.toLocal(water_log.water_end)), water_log.hum_end );
+        line[28] |= 0x80; //enable dot
+        line[62] |= 0x80; //enable dot
       }
       else {
-        snprintf(line, 64, "no last run info");
+        snprintf(line, LINELEN, "no last run info");
       }
       panel.displayRunning(line); 
       tDisplayRunning.setInterval(RUNNING_DISPLAY_START_DELAY);
@@ -874,8 +916,8 @@ void goodnightCallback() {
   int  hr = hour(tnow);
 
 #ifdef _DEBUG_
-  Serial.print(millis());
-  Serial.println(": goodnightCallback.");
+//  Serial.print(millis());
+//  Serial.println(": goodnightCallback.");
 #endif
   switch (hr) {
     case 7:
@@ -913,8 +955,8 @@ void goodnightCallback() {
     tMeasure.disable();
     measurePower(false);
     tWater.disable();
-    tWaterOff.disable();
-    tWaterAnimation.disable();
+//    tWaterOff.disable();
+//    tWaterAnimation.disable();
   }
   if (night_time) {
     if (displayNow != DEMPTY) switchDisplayNow(DGOODNIGHT, 0); //switchDisplayNow(DEMPTY, 0);
@@ -930,8 +972,8 @@ void goodnightCallback() {
 int pressCnt = 0;
 void interruptCallback() {
 #ifdef _DEBUG_
-  Serial.print(millis());
-  Serial.println(": interruptCallback.");
+//  Serial.print(millis());
+//  Serial.println(": interruptCallback.");
 #endif
   enableInterrupt(BTN_SEL_PIN, &initButtons, RISING); 
   enableInterrupt(BTN_PLUS_PIN, &initButtons, RISING); 
@@ -961,8 +1003,8 @@ void buttonRelease() {
 
 void buttonISR() {
 #ifdef _DEBUG_
-  Serial.print(millis());
-  Serial.println(": buttonISR.");
+//  Serial.print(millis());
+//  Serial.println(": buttonISR.");
 #endif
 
   if (pressCnt == 0) {
@@ -980,7 +1022,7 @@ void buttonISR() {
 
   if (!panel_status) {
 #ifdef _DEBUG_
-  Serial.println("Panel On");
+//  Serial.println("Panel On");
 #endif
 
     switchDisplayNow((night_time ? DEMPTY : DHUMIDITY), 0);
@@ -1034,8 +1076,8 @@ void buttonsCallback() {
   
 
 #ifdef _DEBUG_
-  Serial.print(millis());
-  Serial.println(": buttonsCallback.");
+//  Serial.print(millis());
+//  Serial.println(": buttonsCallback.");
 #endif
 
 //  sel = digitalRead(BTN_SEL_PIN);
@@ -1050,8 +1092,8 @@ void buttonsCallback() {
     }
 
 #ifdef _DEBUG_
-  Serial.print("sel/plus/minus=");Serial.print(sel);Serial.print(plus);Serial.println(minus);
-  Serial.print("repeat Count=");Serial.println(pressCnt);
+//  Serial.print("sel/plus/minus=");Serial.print(sel);Serial.print(plus);Serial.println(minus);
+//  Serial.print("repeat Count=");Serial.println(pressCnt);
 #endif
 
   if (plus) increment = 1;
@@ -1063,7 +1105,7 @@ void buttonsCallback() {
       case DEMPTY:
         switchDisplayNow(DSET, 0);
         
-        motorOff();
+//        motorOff();
         measurePower(false);
         
         ts.disableAll();
@@ -1092,18 +1134,19 @@ void buttonsCallback() {
 
       case DLOG:
         paramIndex = 0;
-        tnow = myTZ.toLocal( readLogEntryDate(paramIndex) );
-        calcTime(tnow);
+        readLogEntry(paramIndex);
         switchDisplayNow(DLOG_V, 0);
         break;
 
       case DFRN:
-          tWater.set(parameters.saturate * TASK_MINUTE, parameters.retries + 1, &waterCallback);
+//          tWater.set(parameters.saturate * TASK_MINUTE, parameters.retries + 1, &waterCallback, &waterOnEnable, &waterOnDisable);
+          tWater.setInterval( parameters.saturate * TASK_MINUTE );
+          tWater.setIterations( parameters.retries + 1 );         
           tWater.enable();
           tMeasure.set(TMEASURE_WATERTIME * TASK_SECOND, -1, &measureCallback);
           tMeasure.enableDelayed();  
           error = false;
-          writeLogEntry();
+//          writeLogEntry();
           settingsDoTout();
           switchDisplayNow(DCLK_SET, 0);
           return;         
@@ -1188,8 +1231,7 @@ void buttonsCallback() {
         paramIndex += increment;
         if (paramIndex < 0) paramIndex = logCount;
         if (paramIndex >= logCount) paramIndex = 0;
-        tnow =myTZ.toLocal(readLogEntryDate(paramIndex));
-        calcTime(tnow);
+        readLogEntry(paramIndex);
         switchDisplayNow(DLOG_V, 0);
         break;
         
@@ -1237,14 +1279,14 @@ void buttonsCallback() {
 
   if (sel || plus || minus) {
 #ifdef _DEBUG_
-  Serial.println("some button pressed");
+//  Serial.println("some button pressed");
 #endif
     tSettingsTimeout.delay();
     pressCnt++;
   }
   else {
 #ifdef _DEBUG_
-  Serial.println("no buttons pressed");
+//  Serial.println("no buttons pressed");
 #endif
     tIsr.disable();
     tInterrupt.restart();
@@ -1382,7 +1424,7 @@ void setup () {
   measurePowerupCallback();
 
 #ifdef _DEBUG_
-  Serial.println("Done: measurePowerupCallback");
+//  Serial.println("Done: measurePowerupCallback");
 #endif
   
   error = false;
