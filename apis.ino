@@ -50,7 +50,6 @@
 #include <TM1650.h>
 
 #define _TASK_SLEEP_ON_IDLE_RUN
-#define _TASK_ROLLOVER_FIX
 #include <TaskScheduler.h>
 #include <EEPROM.h>
 #include <Wire.h>
