@@ -44,6 +44,9 @@
   2015-11-20
     v1.8.1 - bug fix: Settings timeout should not kick in while displying running text
     v1.8.1 - bug fix: Cancel settings leads to 30 seconds delay instead of 5 seconds (TaskScheduler bug discovered)
+  2015-12-23
+    v1.8.2 - complied with latest TM1650 ro enable gradual brightness 7 seg panel On and Off
+    v1.8.2 - compiled with the latest TaskScheduler v2.0.0
     
  ----------------------------------------*/
 
@@ -129,7 +132,7 @@
 #define BTN_REPEAT    1000
 #define BNT_RPT_CNT   5
 #define BTN_RAPID     250
-#define BNT_DEBOUNCE  5
+#define BNT_DEBOUNCE  20
 
 AnalogInput<MOISTUREPIN>  pMoisture;
 Output<POWERUP_PIN>       pPowerup;
@@ -193,6 +196,7 @@ enum Display_Options : byte {
 Display_Options displayNow = DHUMIDITY;
 TM1650 panel;
 bool   panel_status;
+byte   panel_brightness = TM1650_MAX_BRIGHT;
 // volatile int buttonPressed;
 
 #ifndef _TEST_
@@ -312,8 +316,8 @@ byte  logCount;
 void motorOff()
 {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": motorOff");
+  Serial.print(millis());
+  Serial.println(F(": motorOff"));
 #endif
 //  digitalWrite(M1E1, LOW);
 //  digitalWrite(M1P1, LOW);
@@ -326,8 +330,8 @@ void motorOff()
 void motorOn()
 {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": motorOn");
+  Serial.print(millis());
+  Serial.println(F(": motorOn"));
 #endif
 //  digitalWrite(M1P1, HIGH);
 //  digitalWrite(M1P2, LOW);
@@ -339,12 +343,24 @@ void motorOn()
 }
 
 void panelOn() {
+#ifdef _DEBUG_
+  Serial.print(millis());
+  Serial.println(F(": panelOn"));
+#endif
+
   panel_status = true;
   panel.displayOn();
+  panel.setBrightnessGradually(panel_brightness);
 }
 
 void panelOff() {
+  #ifdef _DEBUG_
+  Serial.print(millis());
+  Serial.println(F(": panelOff"));
+#endif
+
   panel_status = false;
+  panel.setBrightnessGradually(TM1650_MIN_BRIGHT);
   panel.displayOff();
 }
 
@@ -370,9 +386,9 @@ long measureHumidity()
   l = pMoisture;
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.print(": measureHumidity. l = ");
-//  Serial.println(l);
+  Serial.print(millis());
+  Serial.print(F(": measureHumidity. l = "));
+  Serial.println(l);
 #endif
 
 #ifdef _TEST_
@@ -420,8 +436,8 @@ void loadParameters() {
   byte *p;
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": loadParameters.");
+  Serial.print(millis());
+  Serial.println(F(": loadParameters."));
 #endif
   // Let's see if we have the defaults stored already
   // First lets read the token.
@@ -457,8 +473,8 @@ void saveParameters() {
   byte *p;
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": saveParameters.");
+  Serial.print(millis());
+  Serial.println(F(": saveParameters."));
 #endif
 
   p = (byte *) &parameters;
@@ -475,8 +491,8 @@ void writeLogEntry() {
   int   len = sizeof(water_log);
   
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": writeLogEntry.");
+  Serial.print(millis());
+  Serial.println(F(": writeLogEntry."));
 #endif
 
   for (int i = 0; i < len; i++, p++) {
@@ -491,8 +507,8 @@ void writeLogEntry() {
 
 bool lastLogEntry() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": lastLogEntryDate.");
+  Serial.print(millis());
+  Serial.println(F(": lastLogEntryDate."));
 #endif
   
   return readLogEntry(0);
@@ -504,8 +520,8 @@ bool readLogEntry(int aIndex) {
   int   len = sizeof(water_log);
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": readLogEntryDate.");
+  Serial.print(millis());
+  Serial.println(F(": readLogEntryDate."));
 #endif
 
   if (logCount == 0) return false;
@@ -522,8 +538,8 @@ bool readLogEntry(int aIndex) {
 
 void measurePowerupCallback() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": measurePowerupCallback.");
+  Serial.print(millis());
+  Serial.println(F(": measurePowerupCallback."));
 #endif
   measurePower(true);
   tMeasure.set(TMEASURE_PRIME * TASK_SECOND, TASK_FOREVER, &measureCallback);
@@ -543,10 +559,10 @@ void measureCallback() {
   }
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.print(": measureCallback. Humidity =");
-//  Serial.print(currentHumidity);
-//  Serial.println("%");
+  Serial.print(millis());
+  Serial.print(F(": measureCallback. Humidity ="));
+  Serial.print(currentHumidity);
+  Serial.println("%");
 #endif
 
   if (currentHumidity > 0 && currentHumidity < parameters.low) {
@@ -604,9 +620,9 @@ void waterOnDisable() {
 
 void waterCallback() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.print(": waterCallback. Iteration: ");
-//  Serial.println(tWater.getIterations());
+  Serial.print(millis());
+  Serial.print(F(": waterCallback. Iteration: "));
+  Serial.println(tWater.getIterations());
 #endif
 
   if (!tWater.isLastIteration()) {
@@ -632,8 +648,8 @@ void waterCallback() {
 
 void waterOffCallback() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": waterOffCallback.");
+  Serial.print(millis());
+  Serial.println(F(": waterOffCallback."));
 #endif
   motorOff();
   tWater.delay();
@@ -684,8 +700,8 @@ void animationSaturateCallback() {
 
 void displayTimeout() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": displayTimeout.");
+  Serial.print(millis());
+  Serial.println(F(": displayTimeout."));
 #endif  
   if (!tWater.isEnabled()) panelOff();
 }
@@ -700,7 +716,7 @@ void displayCallback() {
   tDisplayTimeout.delay();
   
   if (tDisplayRunning.isEnabled()) return;
-  panelOn();
+//  panelOn();
 
   switch (displayNow) {
     case DHUMIDITY:
@@ -824,11 +840,14 @@ void displayCallback() {
     case DERROR:
       break;
   }
-  if (!tDisplayRunning.isEnabled()) panel.displayString(line);
+  if (!tDisplayRunning.isEnabled()) { 
+    panel.displayString(line);
+    panelOn();
+  }
   
 #ifdef _DEBUG_
   Serial.print(millis());
-  Serial.print(": displayCallback. line=");
+  Serial.print(F(": displayCallback. line="));
   Serial.println(line);
 #endif
 }
@@ -837,7 +856,7 @@ void displayCallback() {
 void showHumidity(int aDelay) {
 #ifdef _DEBUG_
   Serial.print(millis());
-  Serial.println(": showHumidity");
+  Serial.println(F(": showHumidity"));
 #endif  
   switchDisplayNow(DHUMIDITY, aDelay);
 }
@@ -846,7 +865,7 @@ void showHumidity(int aDelay) {
 void switchDisplayNow(int aStatus, int aDelay) {
 #ifdef _DEBUG_
   Serial.print(millis());
-  Serial.print(": switchDisplayNow. delay=");
+  Serial.print(F(": switchDisplayNow. delay="));
   Serial.println(aDelay);
 #endif  
   displayNow = (Display_Options) aStatus;
@@ -860,7 +879,6 @@ void switchDisplayNow(int aStatus, int aDelay) {
 }
 
 void displayRunningCallback() {
-  panelOn();
   tDisplayTimeout.delay();
   tSettingsTimeout.delay();
   tDisplayRunning.setInterval(RUNNING_DISPLAY_DELAY);
@@ -868,6 +886,7 @@ void displayRunningCallback() {
     tDisplay.delay(TDISPLAY_SHORT_DELAY * TASK_SECOND);
     tDisplayRunning.disable();
   }
+  panelOn();
 }
 
 
@@ -882,9 +901,9 @@ bool isNight() {
   if (weekday(tnow) == dowSunday || weekday(tnow) == dowSaturday) wkp += parameters.wkendadj;
   
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.print(": isNight. hr=");
-//  Serial.println(hr);
+  Serial.print(millis());
+  Serial.print(F(": isNight. hr="));
+  Serial.println(hr);
 #endif
 
   return (hr >= parameters.gotosleep || hr < wkp);
@@ -908,15 +927,15 @@ void goodnightCallback() {
   int  hr = hour(tnow);
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": goodnightCallback.");
+  Serial.print(millis());
+  Serial.println(F(": goodnightCallback."));
 #endif
   switch (hr) {
     case 7:
-      panel.setBrightness(3);
+      panel_brightness = 3; 
       break;
     case 8:
-      panel.setBrightness(5);
+      panel_brightness = 5;
       break;
     case 9:
     case 10:
@@ -927,19 +946,20 @@ void goodnightCallback() {
     case 15:
     case 16:
     case 17:
-      panel.setBrightness(7);
+      panel_brightness = 7;
       break;
     case 18:
-      panel.setBrightness(6);
+      panel_brightness = 6;
       break;
     case 19:
     case 20:
-      panel.setBrightness(3);
+      panel_brightness = 3;
       break;
     default:
-      panel.setBrightness(1);
+      panel_brightness = 1;
   }
-
+  panel.setBrightness(panel_brightness);
+  
   if (!night_time && isNight() ) {
     night_time = true;
     motorOff();
@@ -964,8 +984,8 @@ void goodnightCallback() {
 int pressCnt = 0;
 void interruptCallback() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": interruptCallback.");
+  Serial.print(millis());
+  Serial.println(F(": interruptCallback."));
 #endif
   enableInterrupt(BTN_SEL_PIN, &initButtons, RISING); 
   enableInterrupt(BTN_PLUS_PIN, &initButtons, RISING); 
@@ -993,8 +1013,8 @@ void buttonRelease() {
 
 void buttonISR() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": buttonISR.");
+  Serial.print(millis());
+  Serial.println(F(": buttonISR."));
 #endif
 
   if (pressCnt == 0) {
@@ -1011,7 +1031,7 @@ void buttonISR() {
 
   if (!panel_status) {
 #ifdef _DEBUG_
-//  Serial.println("Panel On");
+//  Serial.println(F("Panel On"));
 #endif
 
     switchDisplayNow((night_time ? DEMPTY : DHUMIDITY), 0);
@@ -1025,7 +1045,7 @@ void buttonISR() {
 void settingsToutCallback() {
 #ifdef _DEBUG_
   Serial.print(millis());
-  Serial.println(": settingsToutCallback.");
+  Serial.println(F(": settingsToutCallback."));
 #endif
   loadParameters();
   displayOnlyDoTout();
@@ -1059,8 +1079,8 @@ void buttonsCallback() {
   
 
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": buttonsCallback.");
+  Serial.print(millis());
+  Serial.println(F(": buttonsCallback."));
 #endif
 
     sel = plus = minus = false;
@@ -1072,8 +1092,8 @@ void buttonsCallback() {
     }
 
 #ifdef _DEBUG_
-//  Serial.print("sel/plus/minus=");Serial.print(sel);Serial.print(plus);Serial.println(minus);
-//  Serial.print("repeat Count=");Serial.println(pressCnt);
+  Serial.print(F("sel/plus/minus="));Serial.print(sel);Serial.print(plus);Serial.println(minus);
+  Serial.print(F("repeat Count="));Serial.println(pressCnt);
 #endif
 
   if (plus) increment = 1;
@@ -1255,14 +1275,14 @@ void buttonsCallback() {
 
   if (sel || plus || minus) {
 #ifdef _DEBUG_
-//  Serial.println("some button pressed");
+//  Serial.println(F("some button pressed"));
 #endif
     tSettingsTimeout.delay();
     pressCnt++;
   }
   else {
 #ifdef _DEBUG_
-//  Serial.println("no buttons pressed");
+//  Serial.println(F("no buttons pressed"));
 #endif
     tIsr.disable();
     tInterrupt.restart();
@@ -1291,8 +1311,8 @@ void calcTime(time_t aDate) {
 
 void setTimeNow() {
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": setTimeNow.");
+  Serial.print(millis());
+  Serial.println(F(": setTimeNow."));
 #endif
 
 //  rtc.adjust(DateTime(time.cn*100 + time.yr, time.mt, time.dy, time.hr, time.mn, 0));  
@@ -1327,8 +1347,8 @@ void errorCallback() {
   long cnt = 86400L; // 24 hours in  seconds
   
 #ifdef _DEBUG_
-//  Serial.print(millis());
-//  Serial.println(": errorCallback.");
+  Serial.print(millis());
+  Serial.println(F(": errorCallback."));
 #endif
   state = HIGH;
   panel.displayString("Errr");
@@ -1371,18 +1391,18 @@ void setup () {
   Wire.begin(); //Join the bus as master
 
   panel.init();
-  panelOn();
   panel.displayString((char*)CToken);
+  panelOn();
 
 #ifdef _DEBUG_
   Serial.begin(115200);
-  Serial.println("Plant Watering System");
+  Serial.println(F("Plant Watering System"));
 #endif
 
   measurePowerupCallback();
 
 #ifdef _DEBUG_
-//  Serial.println("Done: measurePowerupCallback");
+//  Serial.println(F("Done: measurePowerupCallback"));
 #endif
   
   error = false;
@@ -1392,13 +1412,13 @@ void setup () {
   }
 
 //#ifdef _DEBUG_
-//  Serial.println("Done: currentHumidity cycle");
+//  Serial.println(F("Done: currentHumidity cycle"));
 //#endif
 
   loadParameters();
 
 //#ifdef _DEBUG_
-//  Serial.println("Done: setup::loadParameters");
+//  Serial.println(F("Done: setup::loadParameters"));
 //#endif
 
   adjParam = &parameters.high;
