@@ -1,6 +1,6 @@
 /* -------------------------------------
  Automatic Plant Irrigation System - APIS
-   Code Version 1.8.1
+   Code Version 1.8.4
    Parameters Version 13
 
  Change Log:
@@ -47,6 +47,11 @@
   2015-12-23
     v1.8.2 - complied with latest TM1650 ro enable gradual brightness 7 seg panel On and Off
     v1.8.2 - compiled with the latest TaskScheduler v2.0.0
+  2016-02-18
+    v1.8.3 - compiled with the latest TaskScheduler v2.1.0
+    v1.8.3.- updates to the error handling (device is hard reset after 24 hours)
+  2016-03-07
+    v1.8.4 - added a pump reverse at the end of the run to drain the tubes and prevent mold from forming inside them
     
  ----------------------------------------*/
 
@@ -58,11 +63,11 @@
 #include <Wire.h>
 #include <RTClib.h>
 #include <AvgFilter.h>
+#include <avr/wdt.h>
 
 //#define EI_ARDUINO_INTERRUPTED_PIN
 #include <EnableInterrupt.h>
 
-//#include <Time.h>
 #include <Timezone.h> 
 
 #include <DirectIO.h>
@@ -84,6 +89,8 @@
 #define WATERTIME 60 //Seconds
 #define WATERTIME_MIN 5 //Seconds
 #define WATERTIME_MAX 120 //Seconds
+
+#define WATERTIME_REV 10 // Seconds
 
 // Time to saturate
 #define SATURATE 5 // 5 minutes
@@ -160,7 +167,7 @@ boolean error, night_time;
 int   currentHumidity = 0;
 #else
 int   currentHumidity = 60;
-#endif;
+#endif
 
 enum Display_Options : byte {
   DHUMIDITY,
@@ -235,6 +242,8 @@ void timeSyncCallback();
 void displayRunningCallback();
 void displayTimeout();
 void waterOffCallback();
+void motorOff();
+bool motorReverse();
 
 Task tIsr       (BTN_REPEAT, TASK_FOREVER, &buttonISR, &ts);
 Task tGoodnight (TGOODNIGHT_INTERVAL * TASK_SECOND, TASK_FOREVER, &goodnightCallbackInit, &ts, true);
@@ -246,6 +255,7 @@ Task tDisplayTimeout (TDISPLAY_TIMEOUT * TASK_SECOND, TASK_FOREVER, &displayTime
 Task tInterrupt (TI_INTERVAL, TASK_ONCE, &interruptCallback, &ts);
 Task tWater     (SATURATE * TASK_MINUTE, RETRIES, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
 Task tWaterOff  (WATERTIME * TASK_SECOND, TASK_ONCE, &waterOffCallback, &ts);
+Task tWaterReverse(WATERTIME_REV * TASK_SECOND * 3, TASK_ONCE, NULL, &ts, false, &motorReverse, &motorOff);
 Task tWaterAnimation (ANIMATION_MILLIS, TASK_FOREVER, &animationWaterCallback, &ts);
 Task tError     (TASK_IMMEDIATE, TASK_FOREVER, &errorCallback, &ts);
 #ifdef _TEST_
@@ -340,6 +350,23 @@ void motorOn()
   pM1P1 = HIGH;
   pM1P2 = LOW;
   pM1E1 = HIGH;
+}
+
+bool motorReverse()
+{
+#ifdef _DEBUG_
+  Serial.print(millis());
+  Serial.println(F(": motorOn"));
+#endif
+//  digitalWrite(M1P1, HIGH);
+//  digitalWrite(M1P2, LOW);
+//  digitalWrite(M1E1, HIGH);
+
+  pM1P1 = LOW;
+  pM1P2 = HIGH;
+  pM1E1 = HIGH;
+
+  return true;
 }
 
 void panelOn() {
@@ -555,7 +582,7 @@ void measureCallback() {
 
   for (int i=0; i<5; i++) {
     currentHumidity = measureHumidity();
-    delay(10);
+    delay(100);
   }
 
 #ifdef _DEBUG_
@@ -568,7 +595,6 @@ void measureCallback() {
   if (currentHumidity > 0 && currentHumidity < parameters.low) {
     if (!tWater.isEnabled()) {
       showHumidity(0);
-//      tWater.set(parameters.saturate * TASK_MINUTE, parameters.retries + 1, &waterCallback, &waterOnEnable, &waterOnDisable);
       tWater.setInterval( parameters.saturate * TASK_MINUTE );
       tWater.setIterations( parameters.retries + 1 );
       tWater.restart();
@@ -616,6 +642,7 @@ void waterOnDisable() {
   water_log.hum_end = currentHumidity;  
   
   writeLogEntry();  
+  tWaterReverse.restartDelayed();  // reverse the pump to drain the tubes
 }
 
 void waterCallback() {
@@ -628,7 +655,12 @@ void waterCallback() {
   if (!tWater.isLastIteration()) {
     motorOn();
     water_log.num_runs++;
-    tWaterOff.set(parameters.watertime * TASK_SECOND, 1, &waterOffCallback);
+    if ( tWater.isFirstIteration() ) {
+      tWaterOff.set((parameters.watertime + WATERTIME_REV) * TASK_SECOND, 1, &waterOffCallback);  // add extra time to prime the tubes
+    }
+    else {
+      tWaterOff.set(parameters.watertime * TASK_SECOND, 1, &waterOffCallback);
+    }
     tWaterOff.restartDelayed();
     tWaterAnimation.setCallback(&animationWaterCallback);
     tWaterAnimation.enable();
@@ -642,6 +674,7 @@ void waterCallback() {
     return;
   }
   motorOff;
+  measurePower(false);
   ts.disableAll();
   tError.enable();
 }
@@ -661,14 +694,12 @@ void waterOffCallback() {
 int animCounter ;
 
 void animationWaterCallback() {
-  //    if (tWaterAnimation.isFirstIteration()) animCounter = 3;
   panel.setDot(animCounter++, false);
   animCounter &= 3;
   panel.setDot(animCounter, true);
 }
 
 void animationSaturateCallback() {
-  //  if (tWaterAnimation.isFirstIteration()) animCounter = 0;
   switch (animCounter) {
     case 0:
       panel.setDot(0, false);
@@ -716,7 +747,6 @@ void displayCallback() {
   tDisplayTimeout.delay();
   
   if (tDisplayRunning.isEnabled()) return;
-//  panelOn();
 
   switch (displayNow) {
     case DHUMIDITY:
@@ -938,6 +968,8 @@ void goodnightCallback() {
       panel_brightness = 5;
       break;
     case 9:
+      panel_brightness = 6;
+      break;
     case 10:
     case 11:
     case 12:
@@ -952,6 +984,8 @@ void goodnightCallback() {
       panel_brightness = 6;
       break;
     case 19:
+      panel_brightness = 4;
+      break;
     case 20:
       panel_brightness = 3;
       break;
@@ -1344,8 +1378,12 @@ void setTimeNow() {
 }
 
 void errorCallback() {
+#ifdef _TEST_
+  long cnt = 60L  // 1 minute in seconds
+#else
   long cnt = 86400L; // 24 hours in  seconds
-  
+#endif
+
 #ifdef _DEBUG_
   Serial.print(millis());
   Serial.println(F(": errorCallback."));
@@ -1356,14 +1394,17 @@ void errorCallback() {
     // We were not able to achieve desired level in several tries
     // Something is wrong - maybe out of water, regardless, stop and
     // blink for 24 hours, then try again. 
-    state = !state;
-    panel.displayState(state);
-    delay (500);
+//    state = !state;
+    panel.displayState( (state = !state) );
+    delay (1000);
   }
-  panel.displayState(HIGH);
-  tError.disable(); 
-  settingsDoTout();  
-  showHumidity(0);
+//  panel.displayState(HIGH);
+//  tError.disable(); 
+//  settingsDoTout();  
+//  showHumidity(0);
+
+  wdt_enable(WDTO_15MS); // reset the device
+  for(;;);
 }
 
 time_t getTime() {
@@ -1385,6 +1426,7 @@ void setPins() {
 void setup () {
   char line[54];
 
+  wdt_disable();
   setPins();
   motorOff();
 
@@ -1415,6 +1457,7 @@ void setup () {
 //  Serial.println(F("Done: currentHumidity cycle"));
 //#endif
 
+  motorReverse();
   loadParameters();
 
 //#ifdef _DEBUG_
@@ -1431,7 +1474,8 @@ void setup () {
     delay(2000);
   }
 
-
+  motorOff();
+  
 //#ifndef _USERTCMILLIS_
   rtc.begin();
   if (!rtc.isrunning()) {
