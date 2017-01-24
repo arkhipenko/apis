@@ -1,6 +1,6 @@
 /* -------------------------------------
  Automatic Plant Irrigation System - APIS
-   Code Version 1.8.4
+   Code Version 1.8.5
    Parameters Version 13
 
  Change Log:
@@ -52,6 +52,11 @@
     v1.8.3.- updates to the error handling (device is hard reset after 24 hours)
   2016-03-07
     v1.8.4 - added a pump reverse at the end of the run to drain the tubes and prevent mold from forming inside them
+  2016-11-09
+    v1.8.5 - explicitly added '#include <TimeLib.h>' to compile on 1.6.12 without errors
+    v1.8.5 - added functionality to detect water leak under the pot and stop watering if detected (or not even start watering if water is still under the pot)
+  2016-11-17
+    v1.8.5 - added water leak indication (all dots illuminated) when there is water leaking from below the pot
     
  ----------------------------------------*/
 
@@ -62,12 +67,13 @@
 #include <EEPROM.h>
 #include <Wire.h>
 #include <RTClib.h>
-#include <AvgFilter.h>
+#include <AvgFilter.h> 
 #include <avr/wdt.h>
 
 //#define EI_ARDUINO_INTERRUPTED_PIN
 #include <EnableInterrupt.h>
 
+#include <TimeLib.h>  // v1.8.5 - just including Time.h does not work anymore for now() method (for some reason)
 #include <Timezone.h> 
 
 #include <DirectIO.h>
@@ -131,6 +137,8 @@
 #define SENSOR_OUT_VALUE  1000
 
 #define MOISTUREPIN   A1
+#define LEAKPINPWR    A2  // ground or power pin for under the pot moisture measurement
+#define LEAKPINMSR    A3  // input_pullup pin for under the pot moisture measurement
 #define POWERUP_PIN   10
 #define BTN_SEL_PIN   2
 #define BTN_PLUS_PIN  8
@@ -291,7 +299,7 @@ struct {
   byte  dy;
   byte  hr;
   byte  mn;
-} time;
+} mytime;
 
 byte  *adjParam;
 int    paramIndex;
@@ -401,6 +409,15 @@ void measurePower(bool aStatus) {
   pPowerup = aStatus ? HIGH : LOW;
 #endif
 }
+
+bool isLeak() {
+  bool r;
+  pinMode(LEAKPINMSR,INPUT_PULLUP);
+  r = digitalRead(LEAKPINMSR) == LOW;
+  pinMode(LEAKPINMSR,INPUT); 
+  return r; 
+}
+
 
 long  humData[5];
 avgFilter hum(5, humData);
@@ -592,7 +609,7 @@ void measureCallback() {
   Serial.println("%");
 #endif
 
-  if (currentHumidity > 0 && currentHumidity < parameters.low) {
+  if (!isLeak() && currentHumidity > 0 && currentHumidity < parameters.low) {
     if (!tWater.isEnabled()) {
       showHumidity(0);
       tWater.setInterval( parameters.saturate * TASK_MINUTE );
@@ -606,7 +623,7 @@ void measureCallback() {
   }
   
   showHumidity(1);
-  if (tWater.isEnabled() && currentHumidity >= parameters.high) {
+  if ( (tWater.isEnabled() && currentHumidity >= parameters.high) || isLeak()) {
     tWater.disable();
   }
   
@@ -619,7 +636,7 @@ void measureCallback() {
 
 bool waterOnEnable() {
   
-  if (night_time) {
+  if ( night_time || isLeak() ) {
     motorOff();
     return false;
   } 
@@ -873,6 +890,12 @@ void displayCallback() {
   if (!tDisplayRunning.isEnabled()) { 
     panel.displayString(line);
     panelOn();
+    if (isLeak()) {
+      panel.setDot(0, true);
+      panel.setDot(1, true);
+      panel.setDot(2, true);
+      panel.setDot(3, true);
+    }
   }
   
 #ifdef _DEBUG_
@@ -1159,7 +1182,7 @@ void buttonsCallback() {
       case DCLK:
         tnow = myTZ.toLocal( now() );
         calcTime(tnow);
-        adjParam = &time.cn;
+        adjParam = &mytime.cn;
         paramIndex = CLOCKIDXSTART;
         switchDisplayNow(DCLK_CN, 0);
         break;
@@ -1280,9 +1303,9 @@ void buttonsCallback() {
       case DCLK_HR:
       case DCLK_MN:
         if (displayNow > DCLK) {
-          switch (time.mt) {
+          switch (mytime.mt) {
             case 2:
-              paramMax[DAYSIDX] = isLeapYear(time.cn * 100 + time.yr) ? 29 : 28;
+              paramMax[DAYSIDX] = isLeapYear(mytime.cn * 100 + mytime.yr) ? 29 : 28;
               break;
 
             case 4:
@@ -1335,12 +1358,12 @@ bool isLeapYear (int aYr) {
 //  byte  mn; // minute
 
 void calcTime(time_t aDate) {
-        time.cn = year(aDate) / 100;
-        time.yr = year(aDate) % 100;
-        time.mt = month(aDate);
-        time.dy = day(aDate);
-        time.hr = hour(aDate);
-        time.mn = minute(aDate);
+        mytime.cn = year(aDate) / 100;
+        mytime.yr = year(aDate) % 100;
+        mytime.mt = month(aDate);
+        mytime.dy = day(aDate);
+        mytime.hr = hour(aDate);
+        mytime.mn = minute(aDate);
 }
 
 void setTimeNow() {
@@ -1349,7 +1372,7 @@ void setTimeNow() {
   Serial.println(F(": setTimeNow."));
 #endif
 
-//  rtc.adjust(DateTime(time.cn*100 + time.yr, time.mt, time.dy, time.hr, time.mn, 0));  
+//  rtc.adjust(DateTime(mytime.cn*100 + mytime.yr, mytime.mt, mytime.dy, mytime.hr, mytime.mn, 0));  
 
 //typedef struct  { 
 //  uint8_t Second; 
@@ -1364,12 +1387,12 @@ void setTimeNow() {
     tmElements_t tm; // = { 0, time.mn, time.hr, 0, time.dy, time.mt, time.cn*100 + time.yr - 1970 };
     
     tm.Second = 0;
-    tm.Minute = time.mn;
-    tm.Hour = time.hr;
+    tm.Minute = mytime.mn;
+    tm.Hour = mytime.hr;
     tm.Wday = 0;
-    tm.Day = time.dy;
-    tm.Month = time.mt;
-    tm.Year = time.cn*100 + time.yr - 1970;
+    tm.Day = mytime.dy;
+    tm.Month = mytime.mt;
+    tm.Year = mytime.cn*100 + mytime.yr - 1970;
     time_t utc = myTZ.toUTC( makeTime(tm) );
 #ifndef _USERTCMILLIS_
     rtc.adjust( DateTime(utc) );  
@@ -1379,7 +1402,7 @@ void setTimeNow() {
 
 void errorCallback() {
 #ifdef _TEST_
-  long cnt = 60L  // 1 minute in seconds
+  long cnt = 60L;  // 1 minute in seconds
 #else
   long cnt = 86400L; // 24 hours in  seconds
 #endif
@@ -1419,6 +1442,10 @@ void setPins() {
   pinMode(12, OUTPUT);
   digitalWrite(12, HIGH); //power for RTC
 #endif
+
+  pinMode(LEAKPINPWR, OUTPUT);
+  digitalWrite(LEAKPINPWR, LOW);
+  pinMode(LEAKPINMSR, INPUT);
 }
 
 //#define SET_TIME   1446343140L  // 11/1/2015 1:59:00 AM (1 minutes to DST time change)
