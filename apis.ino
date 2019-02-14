@@ -79,8 +79,8 @@
 #include <DirectIO.h>
 
 //#define _DEBUG_
-#define _TEST_
-#define _USERTCMILLIS_
+//#define _TEST_
+//#define _USERTCMILLIS_
 
 
 #define RETRIES 3
