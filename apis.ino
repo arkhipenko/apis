@@ -79,8 +79,8 @@
 #include <DirectIO.h>
 
 //#define _DEBUG_
-//#define _TEST_
-//#define _USERTCMILLIS_
+#define _TEST_
+#define _USERTCMILLIS_
 
 
 #define RETRIES 3
@@ -1450,6 +1450,7 @@ void setPins() {
 
 //#define SET_TIME   1446343140L  // 11/1/2015 1:59:00 AM (1 minutes to DST time change)
 #define SET_TIME   1420113600L  // 1/1/2015 12:00:00 PM 
+//#define SET_TIME   1543709361L 
 void setup () {
   char line[54];
 
